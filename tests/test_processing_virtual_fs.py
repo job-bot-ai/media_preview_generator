@@ -369,6 +369,9 @@ def test_extract_runs_one_seek_per_interval_and_names_frames(tmp_path):
     assert all(c["input_override"] == "http://127.0.0.1:1/t1" for c in calls)
     assert all(c["use_skip"] is False and c["simple_run"] is True for c in calls)
     assert all(c["post_input_args"][:2] == ["-frames:v", "1"] for c in calls)
+    # The seek lands on a keyframe before t; frame sync must not drop it.
+    assert all(c["post_input_args"][-2:] == ["-fps_mode", "passthrough"] for c in calls)
+    assert all("-recv_buffer_size" in c["pre_input_args"] for c in calls)
     assert sorted(os.listdir(out)) == [f"img-{i:06d}.jpg" for i in range(1, 11)]
     assert speed > 0
 

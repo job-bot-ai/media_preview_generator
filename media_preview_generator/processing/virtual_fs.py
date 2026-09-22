@@ -66,8 +66,10 @@ MAX_CONCURRENCY = 16
 STATS_EVERY = 25
 # Socket buffer on both ends of the proxy connection.  Bounds how far ahead of
 # ffmpeg's reads the proxy can get (and therefore how many chunks it fetches
-# that ffmpeg never consumes) — see ``_ChunkHandler.setup``.
-SOCKET_BUFFER_BYTES = 64 * 1024
+# that ffmpeg never consumes) — see ``_ChunkHandler.setup``.  512 KiB keeps
+# that to well under one chunk; 64 KiB was measured to stall loopback
+# throughput (a 4 MiB chunk took seconds to hand over).
+SOCKET_BUFFER_BYTES = 512 * 1024
 
 
 class SamplingCancelled(Exception):
@@ -490,7 +492,14 @@ def extract(
                 "-recv_buffer_size",
                 str(SOCKET_BUFFER_BYTES),
             ],
-            post_input_args=["-frames:v", "1", "-update", "1"],
+            # ``-fps_mode passthrough``: without it the output's frame sync
+            # drops every decoded frame timestamped before the seek target,
+            # so ffmpeg quietly decodes from the keyframe all the way to ``t``
+            # (measured: 80–120 frames and 8–13 MB per thumbnail).  Passing
+            # frames through emits the keyframe the seek landed on — the same
+            # frame the sequential ``-skip_frame nokey`` pass would use — and
+            # the process ends after ~4 decoded frames and one chunk.
+            post_input_args=["-frames:v", "1", "-update", "1", "-fps_mode", "passthrough"],
             output_override=out,
             simple_run=True,
         )
