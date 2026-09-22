@@ -211,6 +211,18 @@ class _ChunkHandler(BaseHTTPRequestHandler):
         token = self.path.lstrip("/").split("/", 1)[0].split("?", 1)[0]
         return self.server.targets.get(token)
 
+    def send_response(self, code, message=None):
+        # One request per connection, and say so.  ffmpeg >= 8 "soft-seeks"
+        # by sending the next Range request on a connection it believes is
+        # still open; if the server closed it silently the seek fails, the
+        # demuxer is left at EOF, and it gives up on the index — every -ss
+        # then degrades to a linear scan of the file (measured: 43 requests /
+        # 169 MiB for one thumbnail instead of one).  Advertising the close
+        # makes it open a fresh connection per seek, which is what we want.
+        super().send_response(code, message)
+        self.send_header("Connection", "close")
+        self.close_connection = True
+
     def do_HEAD(self):  # noqa: N802 - http.server naming
         target = self._target()
         if target is None:

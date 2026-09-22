@@ -227,6 +227,26 @@ def test_proxy_serves_exact_ranges_from_aligned_chunks(upstream, proxy):
     assert gets[0][1] == f"bytes=0-{MIB - 1}"
 
 
+def test_proxy_advertises_one_request_per_connection(upstream, proxy):
+    # ffmpeg >= 8 reuses a connection for its next Range request unless the
+    # response said "Connection: close"; a silently closed connection makes
+    # that seek fail, the demuxer never loads the index, and every -ss turns
+    # into a linear scan.  Every response, including HEAD and 416, must say so.
+    local = proxy.add(upstream.url, None)
+    port = proxy.server_address[1]
+    path = local[len(proxy.base_url) :]
+
+    resp, _ = _fetch(port, path, "bytes=0-99")
+    assert resp.getheader("Connection") == "close"
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.request("HEAD", path)
+    assert conn.getresponse().getheader("Connection") == "close"
+    conn.close()
+    resp, _ = _fetch(port, path, f"bytes={len(upstream.blob) + 10}-")
+    assert resp.status == 416
+    assert resp.getheader("Connection") == "close"
+
+
 def test_proxy_caches_chunks_so_header_rereads_cost_nothing(upstream, proxy):
     local = proxy.add(upstream.url, None)
     port = proxy.server_address[1]
