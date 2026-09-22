@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import base64
 import os
+import socket
 import threading
 import time
 import urllib.error
@@ -63,6 +64,10 @@ DEFAULT_CONCURRENCY = 4
 MAX_CONCURRENCY = 16
 # Log proxy request/byte counters this often during a sampled run.
 STATS_EVERY = 25
+# Socket buffer on both ends of the proxy connection.  Bounds how far ahead of
+# ffmpeg's reads the proxy can get (and therefore how many chunks it fetches
+# that ffmpeg never consumes) — see ``_ChunkHandler.setup``.
+SOCKET_BUFFER_BYTES = 64 * 1024
 
 
 class SamplingCancelled(Exception):
@@ -203,6 +208,19 @@ def plan(video_file: str, config, duration_s: float | None) -> SamplePlan | None
 
 class _ChunkHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+
+    def setup(self):
+        # ffmpeg asks for open-ended ranges (``bytes=N-``) and reads only what
+        # it needs before seeking again.  With default loopback buffers the
+        # kernel would happily absorb megabytes we write ahead of its reads,
+        # and every one of those bytes is an upstream chunk fetched for
+        # nothing (measured: 3–7 requests per thumbnail instead of 1–2).  A
+        # small send buffer here, plus a small receive buffer on ffmpeg's side
+        # (``SOCKET_BUFFER_BYTES`` in :func:`extract`), makes writes block
+        # within the current chunk, so the next chunk is fetched only once
+        # ffmpeg is actually reading it.
+        super().setup()
+        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES)
 
     def log_message(self, format, *args):  # noqa: A002 - BaseHTTPRequestHandler signature
         logger.trace("virtual-fs proxy: " + format, *args)
@@ -463,7 +481,15 @@ def extract(
         rc, _, _, lines = run_ffmpeg(
             use_skip=False,
             input_override=local_url,
-            pre_input_args=["-noaccurate_seek", "-ss", str(t), "-seekable", "1"],
+            pre_input_args=[
+                "-noaccurate_seek",
+                "-ss",
+                str(t),
+                "-seekable",
+                "1",
+                "-recv_buffer_size",
+                str(SOCKET_BUFFER_BYTES),
+            ],
             post_input_args=["-frames:v", "1", "-update", "1"],
             output_override=out,
             simple_run=True,

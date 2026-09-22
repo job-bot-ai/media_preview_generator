@@ -107,6 +107,10 @@ def _fetch(port: int, path: str, rng: str | None, read: int | None = None):
     conn.request("GET", path, headers=headers)
     resp = conn.getresponse()
     body = resp.read(read) if read is not None else resp.read()
+    # The proxy answers "Connection: close", which makes http.client hand the
+    # socket to the response object; close that too so the server really
+    # sees the hang-up (as it does when ffmpeg exits).
+    resp.close()
     conn.close()
     return resp, body
 
