@@ -1345,6 +1345,21 @@ def generate_images(
     # first and falls back via the retry below if the decoder rejects it.
     use_skip_initial = not (use_libplacebo or dv5_software_fallback)
 
+    # Files on a configured virtual filesystem (rclone / InfiniDysk /
+    # Decypharr / zurg mounts) are sampled keyframe-by-keyframe through a
+    # chunk proxy instead of decoded front to back — see ``virtual_fs`` for
+    # why the request shape, not the byte count, is what a remote mount
+    # charges for.  ``plan`` returns None for everything else and for
+    # low-bitrate files where the sequential pass is cheaper, so the default
+    # path is untouched.  Decided here, before the keyframe probe: a sampled
+    # run seeks to each frame itself and never uses ``-skip_frame``, so the
+    # probe's answer would be unused — and its dozen 32 s reads through the
+    # mount cost more than the sampled run they would precede (measured: 81 s
+    # of mount reads before the first thumbnail on a 7 GB episode).
+    sample_plan = virtual_fs.plan(video_file, config, _video_duration_seconds(media_info))
+    if sample_plan is not None:
+        use_skip_initial = False
+
     # Issue #238 — pre-flight keyframe probe.
     #
     # ``-skip_frame:v nokey`` tells the decoder to drop every non-keyframe
@@ -1428,18 +1443,11 @@ def generate_images(
     os.makedirs(output_folder, exist_ok=True)
     _clean_output_images(output_folder)
 
-    # First attempt.  Files on a configured virtual filesystem (rclone /
-    # InfiniDysk / Decypharr / zurg mounts) are sampled keyframe-by-keyframe
-    # through a chunk proxy instead of decoded front to back — see
-    # ``virtual_fs`` for why the request shape, not the byte count, is what a
-    # remote mount charges for.  ``plan`` returns None for everything else and
-    # for low-bitrate files where the sequential pass is cheaper, so the
-    # default path is untouched.  A failed sampled run reports rc != 0 with
-    # ``use_skip_initial`` cleared, which lets the existing cascade below fall
-    # back to the ordinary sequential decode.
-    sample_plan = virtual_fs.plan(video_file, config, _video_duration_seconds(media_info))
+    # First attempt.  A sampled run (planned above) reports rc != 0 with
+    # ``use_skip_initial`` already cleared when too many samples fail, which
+    # lets the existing cascade below fall back to the ordinary sequential
+    # decode.
     if sample_plan is not None:
-        use_skip_initial = False
         try:
             rc, seconds, speed, stderr_lines = virtual_fs.extract(
                 sample_plan,

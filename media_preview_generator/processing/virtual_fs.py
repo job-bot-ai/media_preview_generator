@@ -446,6 +446,8 @@ def extract(
 
     def one(i: int, t: int) -> tuple[int, int, list[str]]:
         out = os.path.join(output_folder, f"img-{i + 1:06d}.jpg")
+        t_start = time.time()
+        req_before, bytes_before, _ = proxy.snapshot()
         rc, _, _, lines = run_ffmpeg(
             use_skip=False,
             input_override=local_url,
@@ -455,6 +457,16 @@ def extract(
             simple_run=True,
         )
         ok = rc == 0 and os.path.exists(out)
+        req_after, bytes_after, _ = proxy.snapshot()
+        # Exact only when one sample is in flight; still a useful ceiling otherwise.
+        logger.debug(
+            "virtual-fs sample t={}s: rc={} {:.1f}s, {} upstream requests / {} MiB while it ran",
+            t,
+            rc,
+            time.time() - t_start,
+            req_after - req_before,
+            (bytes_after - bytes_before) // MIB,
+        )
         return t, (0 if ok else 1), (lines[-3:] if not ok else [])
 
     # Each sample is a short process that spends most of its life waiting on

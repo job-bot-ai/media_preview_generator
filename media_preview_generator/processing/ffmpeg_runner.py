@@ -395,6 +395,13 @@ def create_ffmpeg_runner(
             effective_vf = vf_override
         else:
             effective_vf = _assemble_vf(effective_gpu, hw_decode_active, effective_kind)
+        if simple_run and effective_vf.startswith(f"{fps_filter},"):
+            # One seeked frame per process: the fps filter would otherwise
+            # hold the first frame until it has seen a whole interval of
+            # input (10 s of a 1080p stream is ~20 MB, i.e. several remote
+            # requests) before emitting anything.  The seek already picked
+            # the moment; take the first decoded frame.
+            effective_vf = effective_vf[len(fps_filter) + 1 :]
 
         # Add input file and output options.  Input-side options (a seek, the
         # http ``-seekable`` flag) must precede ``-i``; output-side ones
