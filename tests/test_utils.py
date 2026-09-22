@@ -584,3 +584,59 @@ class TestAtomicJsonSaveWithBackup:
         # This should NOT raise — backup is best-effort.
         utils.atomic_json_save_with_backup(str(target), {"v": 2})
         assert _json.loads(target.read_text())["v"] == 2
+
+
+class TestSafePathWithin:
+    """``_safe_path_within`` keeps the submitted path (symlinks intact) once the
+    resolved path passes the same traversal guard as ``_safe_resolve_within``.
+
+    Media servers know a file by the path they scanned. In symlink-based
+    libraries (rclone / debrid / Usenet mounts) that is the link, so a manual
+    job must not hand the server the resolved mount target.
+    """
+
+    def test_symlink_inside_root_is_returned_unresolved(self, tmp_path):
+        from media_preview_generator.web.routes._helpers import _safe_path_within
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        target = mount / "38295fab"
+        target.write_bytes(b"x")
+        library = tmp_path / "library"
+        library.mkdir()
+        link = library / "Show - S01E03.mkv"
+        link.symlink_to(target)
+
+        result = _safe_path_within(str(link), str(tmp_path))
+
+        assert result == str(link), "the link path is what the media server indexed"
+        assert os.path.realpath(result) == str(target)
+
+    def test_symlink_escaping_root_is_still_rejected(self, tmp_path):
+        from media_preview_generator.web.routes._helpers import _safe_path_within
+
+        outside = tmp_path.parent / f"outside-{tmp_path.name}"
+        outside.mkdir()
+        try:
+            secret = outside / "secret.mkv"
+            secret.write_bytes(b"x")
+            allowed = tmp_path / "allowed"
+            allowed.mkdir()
+            link = allowed / "escape.mkv"
+            link.symlink_to(secret)
+
+            assert _safe_path_within(str(link), str(allowed)) is None
+        finally:
+            import shutil
+
+            shutil.rmtree(outside, ignore_errors=True)
+
+    def test_normalises_but_does_not_resolve(self, tmp_path):
+        from media_preview_generator.web.routes._helpers import _safe_path_within
+
+        plain = tmp_path / "a" / "b.mkv"
+        plain.parent.mkdir()
+        plain.write_bytes(b"x")
+
+        assert _safe_path_within(f"{tmp_path}/a/./b.mkv", str(tmp_path)) == str(plain)
+        assert _safe_path_within(f"{tmp_path}/a/../../../etc/passwd", str(tmp_path)) is None

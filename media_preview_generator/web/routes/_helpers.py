@@ -91,6 +91,22 @@ def _safe_resolve_within(user_path: str, allowed_root: str) -> str | None:
     return resolved
 
 
+def _safe_path_within(user_path: str, allowed_root: str) -> str | None:
+    """Like :func:`_safe_resolve_within`, but hand back the path *as submitted*.
+
+    Media servers know a file by the path they scanned, and in symlink-based
+    libraries (rclone / debrid / Usenet mounts, where every library entry is a
+    link into the mount) that is the link, not its target.  Resolving the
+    symlink before handing the path to the server turns a valid manual job
+    into "no configured library matches this path".  The traversal guard is
+    still applied to the fully resolved path, so a link pointing outside the
+    allowed root is rejected exactly as before.
+    """
+    if _safe_resolve_within(user_path, allowed_root) is None:
+        return None
+    return os.path.abspath(os.path.normpath(user_path))
+
+
 def _ensure_gpu_cache() -> None:
     """Run GPU detection once and cache the result. No-op if already cached."""
     with _gpu_cache_lock:

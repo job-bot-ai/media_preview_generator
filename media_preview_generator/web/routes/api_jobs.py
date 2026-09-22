@@ -31,7 +31,7 @@ from ._helpers import (
     _gpu_cache,
     _gpu_cache_lock,
     _param_to_bool,
-    _safe_resolve_within,
+    _safe_path_within,
     limiter,
 )
 from .job_runner import _start_job_async
@@ -743,7 +743,11 @@ def create_manual_job():
         path_str = str(raw).strip()
         if not path_str:
             continue
-        resolved = _safe_resolve_within(path_str, MEDIA_ROOT)
+        # Keep the path as submitted (symlinks intact): the media server knows
+        # the file by the path it scanned, which in symlink-based libraries is
+        # the link, not the mount target.  Traversal is still checked on the
+        # resolved path inside _safe_path_within.
+        resolved = _safe_path_within(path_str, MEDIA_ROOT)
         if resolved is None:
             return jsonify({"error": f"Path is outside allowed media root: {path_str}"}), 400
         resolved_paths.append(resolved)
