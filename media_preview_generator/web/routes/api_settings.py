@@ -305,6 +305,22 @@ def get_settings():
             "thumbnail_interval": settings.thumbnail_interval,
             "thumbnail_quality": settings.thumbnail_quality,
             "tonemap_algorithm": settings.tonemap_algorithm,
+            # Virtual filesystem reads (rclone / InfiniDysk / Decypharr / zurg).
+            # Source passwords never leave the server; the UI shows a mask and
+            # save_settings keeps the stored value when the mask comes back.
+            "virtual_fs_enabled": bool(settings.get("virtual_fs_enabled", False)),
+            "virtual_fs_mode": settings.get("virtual_fs_mode", "auto") or "auto",
+            "virtual_fs_request_mb": max(1, min(64, int(settings.get("virtual_fs_request_mb", 4) or 4))),
+            "virtual_fs_sources": [
+                {
+                    "local_root": str(s.get("local_root", "")),
+                    "url": str(s.get("url", "")),
+                    "user": str(s.get("user", "")),
+                    "password": "****" if s.get("password") else "",
+                }
+                for s in (settings.get("virtual_fs_sources") or [])
+                if isinstance(s, dict)
+            ],
             "log_level": settings.get("log_level", "INFO"),
             "log_rotation_size": settings.get("log_rotation_size", "10 MB"),
             "log_retention_count": settings.get("log_retention_count", 5),
@@ -377,6 +393,10 @@ _SAVE_SETTINGS_ALLOWED_FIELDS = (
     "frame_reuse",
     "config_backup_keep",
     "config_backup_max_age_days",
+    "virtual_fs_enabled",
+    "virtual_fs_mode",
+    "virtual_fs_request_mb",
+    "virtual_fs_sources",
 )
 
 _SAVE_SETTINGS_INT_FIELDS = (
@@ -395,9 +415,10 @@ _SAVE_SETTINGS_INT_FIELDS = (
     "max_concurrent_jobs",
     "config_backup_keep",
     "config_backup_max_age_days",
+    "virtual_fs_request_mb",
 )
 
-_SAVE_SETTINGS_BOOL_FIELDS = ("plex_verify_ssl", "webhook_enabled", "auto_requeue_on_restart")
+_SAVE_SETTINGS_BOOL_FIELDS = ("plex_verify_ssl", "webhook_enabled", "auto_requeue_on_restart", "virtual_fs_enabled")
 
 
 def _validate_and_coerce_settings_updates(data: dict) -> tuple[dict | None, tuple | None]:
@@ -499,6 +520,41 @@ def _validate_and_coerce_settings_updates(data: dict) -> tuple[dict | None, tupl
         candidate = str(updates["webhook_secret"] or "").strip()
         if not candidate or candidate == "****":
             del updates["webhook_secret"]
+
+    if "virtual_fs_mode" in updates:
+        mode = str(updates["virtual_fs_mode"] or "auto").strip().lower()
+        if mode not in ("auto", "sampled", "sequential"):
+            return None, (jsonify({"error": "virtual_fs_mode must be auto, sampled or sequential"}), 400)
+        updates["virtual_fs_mode"] = mode
+
+    # Virtual-fs sources: keep only complete rows, and treat a "****"
+    # password the same way as webhook_secret above — the GET view masks
+    # it, so a round-tripped mask means "leave the stored password alone".
+    if "virtual_fs_sources" in updates:
+        raw_sources = updates["virtual_fs_sources"]
+        if not isinstance(raw_sources, list):
+            return None, (jsonify({"error": "virtual_fs_sources must be a list"}), 400)
+        from ..settings_manager import get_settings_manager
+
+        stored = [s for s in (get_settings_manager().get("virtual_fs_sources") or []) if isinstance(s, dict)]
+        cleaned_sources = []
+        for entry in raw_sources:
+            if not isinstance(entry, dict):
+                continue
+            local_root = str(entry.get("local_root") or "").strip()
+            url = str(entry.get("url") or "").strip()
+            if not local_root or not url:
+                continue
+            if not url.startswith(("http://", "https://")):
+                return None, (jsonify({"error": f"virtual_fs source URL must be http(s): {url}"}), 400)
+            password = str(entry.get("password") or "")
+            if password == "****":
+                match = next((s for s in stored if s.get("url") == url), None)
+                password = str(match.get("password") or "") if match else ""
+            cleaned_sources.append(
+                {"local_root": local_root, "url": url, "user": str(entry.get("user") or ""), "password": password}
+            )
+        updates["virtual_fs_sources"] = cleaned_sources
 
     # Sanitize gpu_config: must be a list of dicts with a device key.
     # Normalize: workers <= 0 forces enabled=false (contradictory state).

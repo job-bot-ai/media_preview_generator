@@ -36,6 +36,7 @@ from .validation import (  # noqa: F401
     _validate_paths,
     _validate_plex_config,
     _validate_processing_config,
+    _validate_virtual_fs_config,
     _validate_thread_config,
     thread_totals_from_ui_settings,
     validate_processing_thread_totals,
@@ -205,13 +206,27 @@ class Config:
     # wording.
     server_display_name: str | None = None
 
+    # Virtual filesystem reads (rclone / InfiniDysk / Decypharr / zurg mounts).
+    # Off by default: local files are always cheaper to decode front to back.
+    # When enabled, files that resolve under one of ``virtual_fs_sources``
+    # (``{"local_root", "url", "user", "password"}``) are sampled keyframe by
+    # keyframe over HTTP in ``virtual_fs_request_mb`` chunks — see
+    # ``processing/virtual_fs.py`` for the cost model that decides per file.
+    virtual_fs_enabled: bool = False
+    virtual_fs_mode: str = "auto"  # auto | sampled | sequential
+    virtual_fs_sources: list[dict[str, Any]] = field(default_factory=list)
+    virtual_fs_request_mb: int = 4
+    virtual_fs_auto_margin: float = 1.5
+
     def __repr__(self) -> str:
-        """Return a string representation with plex_token redacted."""
+        """Return a string representation with secrets redacted."""
         fields = []
         for f in self.__dataclass_fields__:
             val = getattr(self, f)
             if f == "plex_token" and val:
                 val = "***REDACTED***"
+            elif f == "virtual_fs_sources" and val:
+                val = [{**s, "password": "***REDACTED***"} if s.get("password") else dict(s) for s in val]
             fields.append(f"{f}={val!r}")
         return f"Config({', '.join(fields)})"
 
@@ -423,6 +438,35 @@ def derive_legacy_plex_view(media_servers: list, server_id: str | None = None) -
     return view
 
 
+def normalize_virtual_fs_sources(raw: Any) -> list[dict[str, Any]]:
+    """Keep only well-formed virtual-fs source entries.
+
+    An entry needs the mount path and the HTTP root that mirrors it; credentials
+    are optional.  Anything else (wrong type, blank fields) is dropped rather
+    than failing config load, so a half-edited settings page cannot take the
+    whole generator down.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        local_root = str(entry.get("local_root") or "").strip()
+        url = str(entry.get("url") or "").strip()
+        if not local_root or not url:
+            continue
+        out.append(
+            {
+                "local_root": local_root,
+                "url": url,
+                "user": str(entry.get("user") or ""),
+                "password": str(entry.get("password") or ""),
+            }
+        )
+    return out
+
+
 def load_config(*, log_validation_errors: bool = True) -> Config:
     """Load and validate configuration from settings.json and environment variables.
 
@@ -562,6 +606,24 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
     tonemap_algorithm = get_value("tonemap_algorithm", "TONEMAP_ALGORITHM", "hable", str).strip().lower()
     regenerate_thumbnails = get_value("regenerate_thumbnails", "REGENERATE_THUMBNAILS", False, bool)
 
+    # Virtual filesystem reads.  settings.json carries a list of sources; the
+    # env fallback describes a single source for headless installs.
+    virtual_fs_enabled = get_value("virtual_fs_enabled", "VIRTUAL_FS_ENABLED", False, bool)
+    virtual_fs_mode = get_value("virtual_fs_mode", "VIRTUAL_FS_MODE", "auto", str).strip().lower()
+    virtual_fs_request_mb = get_value("virtual_fs_request_mb", "VIRTUAL_FS_REQUEST_MB", 4, int)
+    virtual_fs_sources = normalize_virtual_fs_sources(ui_settings.get("virtual_fs_sources"))
+    if not virtual_fs_sources and os.environ.get("VIRTUAL_FS_ROOT") and os.environ.get("VIRTUAL_FS_URL"):
+        virtual_fs_sources = normalize_virtual_fs_sources(
+            [
+                {
+                    "local_root": os.environ.get("VIRTUAL_FS_ROOT", ""),
+                    "url": os.environ.get("VIRTUAL_FS_URL", ""),
+                    "user": os.environ.get("VIRTUAL_FS_USER", ""),
+                    "password": os.environ.get("VIRTUAL_FS_PASSWORD", ""),
+                }
+            ]
+        )
+
     sort_by_raw = get_value("sort_by", "SORT_BY", "newest", str)
     sort_by = sort_by_raw.strip().lower() if sort_by_raw else "newest"
 
@@ -688,6 +750,13 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
         tonemap_algorithm,
         validation_errors,
     )
+    _validate_virtual_fs_config(
+        virtual_fs_enabled,
+        virtual_fs_mode,
+        virtual_fs_sources,
+        virtual_fs_request_mb,
+        validation_errors,
+    )
     no_workers, _thread_note = _validate_thread_config(
         gpu_threads,
         cpu_threads,
@@ -755,6 +824,10 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
         ffmpeg_path=ffmpeg_path,
         log_level=log_level,
         plex_library_ids=plex_library_ids,
+        virtual_fs_enabled=virtual_fs_enabled,
+        virtual_fs_mode=virtual_fs_mode,
+        virtual_fs_sources=virtual_fs_sources,
+        virtual_fs_request_mb=virtual_fs_request_mb,
         # server_display_name intentionally NOT set here — load_config()
         # always projects from media_servers[0] (no server_id param), so
         # surfacing that name on the returned Config would be misleading

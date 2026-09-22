@@ -246,6 +246,56 @@ def _validate_processing_config(
         )
 
 
+VALID_VIRTUAL_FS_MODES = ("auto", "sampled", "sequential")
+
+
+def _validate_virtual_fs_config(
+    virtual_fs_enabled: bool,
+    virtual_fs_mode: str,
+    virtual_fs_sources: list,
+    virtual_fs_request_mb: int,
+    validation_errors: list,
+) -> None:
+    """Validate the virtual-filesystem read settings.
+
+    Only enforced when the feature is on: a disabled feature with stale
+    fields must not block startup.
+
+    Args:
+        virtual_fs_enabled: Whether sampled reads are enabled at all
+        virtual_fs_mode: auto | sampled | sequential
+        virtual_fs_sources: Normalised ``{local_root, url, user, password}`` entries
+        virtual_fs_request_mb: Upstream request size in MiB (the server's per-request floor)
+        validation_errors: List to append validation errors
+
+    """
+    if not virtual_fs_enabled:
+        return
+
+    if virtual_fs_mode not in VALID_VIRTUAL_FS_MODES:
+        validation_errors.append(
+            f"VIRTUAL_FS_MODE must be one of {', '.join(VALID_VIRTUAL_FS_MODES)} (got: {virtual_fs_mode})"
+        )
+
+    # 1 MiB is already below any known server's prefetch batch; 64 MiB would
+    # make a single thumbnail cost more than a short episode.
+    if virtual_fs_request_mb < 1 or virtual_fs_request_mb > 64:
+        validation_errors.append(f"VIRTUAL_FS_REQUEST_MB must be between 1-64 MiB (got: {virtual_fs_request_mb})")
+
+    if not virtual_fs_sources:
+        validation_errors.append(
+            "Virtual filesystem reads are enabled but no source is configured "
+            "(need a mount path and the HTTP/WebDAV URL that mirrors it)"
+        )
+    for entry in virtual_fs_sources:
+        url = str(entry.get("url", ""))
+        if not url.startswith(("http://", "https://")):
+            validation_errors.append(f"Virtual filesystem source URL must start with http:// or https:// (got: {url})")
+        root = str(entry.get("local_root", ""))
+        if not os.path.isabs(root):
+            validation_errors.append(f"Virtual filesystem source mount path must be absolute (got: {root})")
+
+
 def _validate_thread_config(
     gpu_threads: int,
     cpu_threads: int,

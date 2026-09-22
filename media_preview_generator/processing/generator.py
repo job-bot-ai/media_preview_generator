@@ -40,6 +40,7 @@ from enum import Enum
 from loguru import logger
 
 from ..config import Config
+from . import virtual_fs
 from .filter_chain import (
     DV5_PATH_INTEL_OPENCL,
     DV5_PATH_LIBPLACEBO,
@@ -1427,8 +1428,38 @@ def generate_images(
     os.makedirs(output_folder, exist_ok=True)
     _clean_output_images(output_folder)
 
-    # First attempt
-    rc, seconds, speed, stderr_lines = _run_ffmpeg(use_skip_initial, init_vulkan=use_libplacebo)
+    # First attempt.  Files on a configured virtual filesystem (rclone /
+    # InfiniDysk / Decypharr / zurg mounts) are sampled keyframe-by-keyframe
+    # through a chunk proxy instead of decoded front to back — see
+    # ``virtual_fs`` for why the request shape, not the byte count, is what a
+    # remote mount charges for.  ``plan`` returns None for everything else and
+    # for low-bitrate files where the sequential pass is cheaper, so the
+    # default path is untouched.  A failed sampled run reports rc != 0 with
+    # ``use_skip_initial`` cleared, which lets the existing cascade below fall
+    # back to the ordinary sequential decode.
+    sample_plan = virtual_fs.plan(video_file, config, _video_duration_seconds(media_info))
+    if sample_plan is not None:
+        use_skip_initial = False
+        try:
+            rc, seconds, speed, stderr_lines = virtual_fs.extract(
+                sample_plan,
+                output_folder,
+                _run_ffmpeg,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                pause_check=pause_check,
+            )
+        except virtual_fs.SamplingCancelled:
+            raise CancellationError(f"Processing cancelled for {video_file}") from None
+        if rc != 0:
+            logger.warning(
+                "virtual-fs sampled read did not complete for {}; falling back to the sequential pass",
+                video_file,
+            )
+            _clean_output_images(output_folder)
+            rc, seconds, speed, stderr_lines = _run_ffmpeg(use_skip_initial, init_vulkan=use_libplacebo)
+    else:
+        rc, seconds, speed, stderr_lines = _run_ffmpeg(use_skip_initial, init_vulkan=use_libplacebo)
     stderr_lines_all: list[str] = list(stderr_lines) if stderr_lines else []
 
     # Retry once without skip_frame only if FFmpeg returned non-zero and we tried with skip

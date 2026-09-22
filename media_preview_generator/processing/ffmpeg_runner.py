@@ -42,6 +42,11 @@ from .filter_chain import (
     DV5_PATH_VAAPI_VULKAN,
 )
 
+# Ceiling for a ``simple_run`` (one thumbnail from a seek).  Generous because
+# the input may be a remote virtual-fs source that has to pull articles for a
+# cold cluster; a genuinely stuck process still gets reaped.
+SIMPLE_RUN_TIMEOUT_S = 120
+
 
 def create_ffmpeg_runner(
     *,
@@ -161,8 +166,21 @@ def create_ffmpeg_runner(
         init_vulkan: bool = False,
         disable_vaapi_dv5: bool = False,
         path_kind_override: str | None = None,
+        input_override: str | None = None,
+        pre_input_args: list[str] | None = None,
+        post_input_args: list[str] | None = None,
+        output_override: str | None = None,
+        simple_run: bool = False,
     ) -> tuple[int, float, float, list[str]]:
-        """Run FFmpeg once and return (returncode, seconds, speed, stderr_lines)."""
+        """Run FFmpeg once and return (returncode, seconds, speed, stderr_lines).
+
+        The ``*_override`` / ``*_args`` parameters exist for the virtual-fs
+        sampled reader: it runs one short FFmpeg per thumbnail (``-ss`` into a
+        proxy URL, ``-frames:v 1``) and wants exactly this file's hardware-
+        acceleration and filter decisions without re-deriving them.  With
+        ``simple_run`` the call blocks on the short process instead of running
+        the progress/stall monitor that only makes sense for a whole-file pass.
+        """
         # Build FFmpeg command with proper argument ordering
         # Hardware acceleration flags must come BEFORE the input file (-i)
         # Propagate the app's log level to FFmpeg so DEBUG reports include
@@ -378,10 +396,13 @@ def create_ffmpeg_runner(
         else:
             effective_vf = _assemble_vf(effective_gpu, hw_decode_active, effective_kind)
 
-        # Add input file and output options
+        # Add input file and output options.  Input-side options (a seek, the
+        # http ``-seekable`` flag) must precede ``-i``; output-side ones
+        # (``-frames:v``) go after the filter chain.
+        args += list(pre_input_args or [])
         args += [
             "-i",
-            video_file,
+            input_override or video_file,
             "-an",
             "-sn",
             "-dn",
@@ -389,8 +410,9 @@ def create_ffmpeg_runner(
             str(config.thumbnail_quality),
             "-vf",
             effective_vf,
-            f"{output_folder}/img-%06d.jpg",
         ]
+        args += list(post_input_args or [])
+        args += [output_override or f"{output_folder}/img-%06d.jpg"]
 
         start_local = time.time()
         hw_label = "GPU" if gpu else "CPU"
@@ -417,6 +439,28 @@ def create_ffmpeg_runner(
                 logger.debug(
                     "FFmpeg libplacebo path: injecting Vulkan env overrides {} into subprocess", vulkan_overrides
                 )
+
+        if simple_run:
+            # One thumbnail per process: nothing to stream progress from, and
+            # the stall monitor below would misread a slow remote seek as a
+            # hang.  A hard timeout is the only guard a single frame needs.
+            try:
+                proc = subprocess.run(  # noqa: S603 - argv assembled above
+                    args,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    env=ffmpeg_env,
+                    timeout=SIMPLE_RUN_TIMEOUT_S,
+                    text=True,
+                    errors="replace",
+                    check=False,
+                )
+                rc_simple = proc.returncode
+                lines_simple = proc.stderr.splitlines()[-40:] if proc.stderr else []
+            except subprocess.TimeoutExpired:
+                rc_simple = 124
+                lines_simple = [f"ffmpeg timed out after {SIMPLE_RUN_TIMEOUT_S}s"]
+            return rc_simple, time.time() - start_local, 0.0, lines_simple
 
         # Use file polling approach for non-blocking, high-frequency progress monitoring
         thread_id = threading.get_ident()
