@@ -21,6 +21,7 @@ from __future__ import annotations
 import http.client
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
@@ -42,6 +43,7 @@ class FakeConfig:
     virtual_fs_mode: str = "auto"
     virtual_fs_sources: list = field(default_factory=list)
     virtual_fs_request_mb: int = 4
+    virtual_fs_concurrency: int = virtual_fs.DEFAULT_CONCURRENCY
     virtual_fs_auto_margin: float = 1.5
 
 
@@ -305,7 +307,7 @@ def test_proxy_sends_basic_auth_upstream(upstream, proxy):
 # ---------------------------------------------------------------------------
 
 
-def _plan_for(tmp_path, duration_s=95.0):
+def _plan_for(tmp_path, duration_s=95.0, concurrency=1):
     f = tmp_path / "v.mkv"
     f.write_bytes(b"0")
     src = VirtualFsSource(local_root=str(tmp_path), url="http://h:1")
@@ -317,6 +319,7 @@ def _plan_for(tmp_path, duration_s=95.0):
         interval_s=10,
         request_bytes=4 * MIB,
         size_bytes=5_000_000_000,
+        concurrency=concurrency,
     )
 
 
@@ -373,3 +376,74 @@ def test_extract_raises_when_cancelled(tmp_path):
         gp.return_value.snapshot.return_value = (0, 0, 0)
         with pytest.raises(virtual_fs.SamplingCancelled):
             virtual_fs.extract(p, str(tmp_path), lambda **kw: (0, 0, 0, []), cancel_check=lambda: True)
+
+
+def test_extract_overlaps_samples_up_to_the_configured_concurrency(tmp_path):
+    # Every sample blocks on the "server" for a moment; with 4 in flight the
+    # peak overlap must reach 4 and every frame must still land in place.
+    p = _plan_for(tmp_path, duration_s=200.0, concurrency=4)
+    out = tmp_path / "out"
+    out.mkdir()
+    lock = threading.Lock()
+    in_flight = {"now": 0, "peak": 0}
+
+    def slow_runner(**kwargs):
+        with lock:
+            in_flight["now"] += 1
+            in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        time.sleep(0.05)
+        with open(kwargs["output_override"], "wb") as fh:
+            fh.write(b"jpg")
+        with lock:
+            in_flight["now"] -= 1
+        return 0, 0.05, 0.0, []
+
+    with patch.object(virtual_fs, "get_proxy") as gp:
+        gp.return_value.add.return_value = "http://127.0.0.1:1/t1"
+        gp.return_value.snapshot.return_value = (0, 0, 0)
+        rc, *_ = virtual_fs.extract(p, str(out), slow_runner)
+
+    assert rc == 0
+    assert in_flight["peak"] == 4
+    assert sorted(os.listdir(out)) == [f"img-{i:06d}.jpg" for i in range(1, 21)]
+
+
+def test_extract_stops_submitting_once_cancelled_mid_run(tmp_path):
+    p = _plan_for(tmp_path, duration_s=400.0, concurrency=2)
+    out = tmp_path / "out"
+    out.mkdir()
+    started = []
+    cancel = threading.Event()
+
+    def runner(**kwargs):
+        started.append(kwargs["pre_input_args"][2])
+        if len(started) >= 4:
+            cancel.set()
+        with open(kwargs["output_override"], "wb") as fh:
+            fh.write(b"jpg")
+        return 0, 0.01, 0.0, []
+
+    with patch.object(virtual_fs, "get_proxy") as gp:
+        gp.return_value.add.return_value = "http://127.0.0.1:1/t1"
+        gp.return_value.snapshot.return_value = (0, 0, 0)
+        with pytest.raises(virtual_fs.SamplingCancelled):
+            virtual_fs.extract(p, str(out), runner, cancel_check=cancel.is_set)
+
+    # 40 samples were planned; only the ones already in flight ran.
+    assert len(started) < 10
+
+
+def test_plan_clamps_concurrency_from_config(tmp_path):
+    f = tmp_path / "v.mkv"
+    f.write_bytes(b"0")
+    cfg = FakeConfig(
+        virtual_fs_mode="sampled",
+        virtual_fs_sources=[{"local_root": str(tmp_path), "url": "http://h"}],
+    )
+    assert virtual_fs.plan(str(f), cfg, 100.0).concurrency == virtual_fs.DEFAULT_CONCURRENCY
+    cfg.virtual_fs_concurrency = 99
+    assert virtual_fs.plan(str(f), cfg, 100.0).concurrency == virtual_fs.MAX_CONCURRENCY
+    cfg.virtual_fs_concurrency = -3
+    assert virtual_fs.plan(str(f), cfg, 100.0).concurrency == 1
+    cfg.virtual_fs_concurrency = 0  # unset → default
+    assert virtual_fs.plan(str(f), cfg, 100.0).concurrency == virtual_fs.DEFAULT_CONCURRENCY

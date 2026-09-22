@@ -42,6 +42,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -56,6 +57,12 @@ DEFAULT_CACHE_CHUNKS = 32
 # A sampled run is rejected (so the caller falls back to the sequential pass)
 # when more than this fraction of thumbnails failed to extract.
 MAX_FAILURE_FRACTION = 0.05
+# Samples in flight at once by default; each is one short ffmpeg mostly
+# waiting on the source, so this overlaps that wait rather than adding load.
+DEFAULT_CONCURRENCY = 4
+MAX_CONCURRENCY = 16
+# Log proxy request/byte counters this often during a sampled run.
+STATS_EVERY = 25
 
 
 class SamplingCancelled(Exception):
@@ -117,6 +124,7 @@ class SamplePlan:
     interval_s: int
     request_bytes: int
     size_bytes: int
+    concurrency: int = DEFAULT_CONCURRENCY
 
     @property
     def sample_times(self) -> list[int]:
@@ -168,6 +176,7 @@ def plan(video_file: str, config, duration_s: float | None) -> SamplePlan | None
         return None
 
     request_bytes = max(1, int(getattr(config, "virtual_fs_request_mb", 4) or 4)) * MIB
+    concurrency = int(getattr(config, "virtual_fs_concurrency", DEFAULT_CONCURRENCY) or DEFAULT_CONCURRENCY)
     result = SamplePlan(
         video_file=video_file,
         source=source,
@@ -176,6 +185,7 @@ def plan(video_file: str, config, duration_s: float | None) -> SamplePlan | None
         interval_s=max(1, int(config.thumbnail_interval)),
         request_bytes=request_bytes,
         size_bytes=size,
+        concurrency=max(1, min(MAX_CONCURRENCY, concurrency)),
     )
 
     if mode == "auto":
@@ -418,25 +428,23 @@ def extract(
     req0, bytes0, hits0 = proxy.snapshot()
 
     times = sample_plan.sample_times
+    concurrency = max(1, sample_plan.concurrency)
     started = time.time()
     failures = 0
     stderr_tail: list[str] = []
     logger.info(
-        "virtual-fs sampled read for {}: {} thumbnails, ~{} MiB in {} MiB requests vs {} MiB sequential",
+        "virtual-fs sampled read for {}: {} thumbnails, ~{} MiB in {} MiB requests vs {} MiB sequential, {} in flight",
         os.path.basename(sample_plan.video_file),
         len(times),
         sample_plan.estimated_sampled_bytes // MIB,
         sample_plan.request_bytes // MIB,
         sample_plan.estimated_sequential_bytes // MIB,
+        concurrency,
     )
     if progress_callback:
         progress_callback(0, 0, sample_plan.duration_s, "0.0x", media_file=sample_plan.video_file)
 
-    for i, t in enumerate(times):
-        if cancel_check and cancel_check():
-            raise SamplingCancelled(sample_plan.video_file)
-        while pause_check and pause_check():
-            time.sleep(0.5)
+    def one(i: int, t: int) -> tuple[int, int, list[str]]:
         out = os.path.join(output_folder, f"img-{i + 1:06d}.jpg")
         rc, _, _, lines = run_ffmpeg(
             use_skip=False,
@@ -446,22 +454,67 @@ def extract(
             output_override=out,
             simple_run=True,
         )
-        if rc != 0 or not os.path.exists(out):
-            failures += 1
-            stderr_tail.extend(lines[-3:])
-            del stderr_tail[:-30]
-        if progress_callback:
-            elapsed = time.time() - started
-            done = i + 1
-            speed = (done * sample_plan.interval_s) / elapsed if elapsed > 0 else 0.0
-            remaining = (len(times) - done) * (elapsed / done) if done else None
-            progress_callback(
-                100.0 * done / len(times),
-                t,
-                sample_plan.duration_s,
-                f"{speed:.1f}x",
-                remaining,
-            )
+        ok = rc == 0 and os.path.exists(out)
+        return t, (0 if ok else 1), (lines[-3:] if not ok else [])
+
+    # Each sample is a short process that spends most of its life waiting on
+    # the source (a 4 MiB request against a Usenet-backed server takes
+    # seconds), so a few in flight overlap that wait without contending for
+    # anything local.  Submission stays in order and bounded so cancel/pause
+    # are honoured within one batch.
+    done = 0
+    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="virtual-fs-sample") as pool:
+        pending: set = set()
+        it = iter(enumerate(times))
+        exhausted = False
+        while not exhausted or pending:
+            while not exhausted and len(pending) < concurrency:
+                if cancel_check and cancel_check():
+                    for f in pending:
+                        f.cancel()
+                    raise SamplingCancelled(sample_plan.video_file)
+                while pause_check and pause_check():
+                    time.sleep(0.5)
+                try:
+                    i, t = next(it)
+                except StopIteration:
+                    exhausted = True
+                    break
+                pending.add(pool.submit(one, i, t))
+            if not pending:
+                break
+            finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for f in finished:
+                t, failed, lines = f.result()
+                done += 1
+                if failed:
+                    failures += 1
+                    stderr_tail.extend(lines)
+                    del stderr_tail[:-30]
+                elapsed = time.time() - started
+                if progress_callback:
+                    speed = (done * sample_plan.interval_s) / elapsed if elapsed > 0 else 0.0
+                    remaining = (len(times) - done) * (elapsed / done) if done else None
+                    progress_callback(
+                        100.0 * done / len(times),
+                        t,
+                        sample_plan.duration_s,
+                        f"{speed:.1f}x",
+                        remaining,
+                    )
+                if done % STATS_EVERY == 0 and done < len(times):
+                    req_now, bytes_now, hits_now = proxy.snapshot()
+                    logger.info(
+                        "virtual-fs sampled read for {}: {}/{} thumbnails, {:.1f} s/thumbnail, "
+                        "{} upstream requests, {} MiB fetched, {} cache hits",
+                        os.path.basename(sample_plan.video_file),
+                        done,
+                        len(times),
+                        elapsed / done,
+                        req_now - req0,
+                        (bytes_now - bytes0) // MIB,
+                        hits_now - hits0,
+                    )
 
     seconds = time.time() - started
     speed_val = sample_plan.duration_s / seconds if seconds > 0 else 0.0

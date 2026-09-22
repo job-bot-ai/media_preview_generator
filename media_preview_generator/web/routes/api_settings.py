@@ -311,6 +311,7 @@ def get_settings():
             "virtual_fs_enabled": bool(settings.get("virtual_fs_enabled", False)),
             "virtual_fs_mode": settings.get("virtual_fs_mode", "auto") or "auto",
             "virtual_fs_request_mb": max(1, min(64, int(settings.get("virtual_fs_request_mb", 4) or 4))),
+            "virtual_fs_concurrency": max(1, min(16, int(settings.get("virtual_fs_concurrency", 4) or 4))),
             "virtual_fs_sources": [
                 {
                     "local_root": str(s.get("local_root", "")),
@@ -396,6 +397,7 @@ _SAVE_SETTINGS_ALLOWED_FIELDS = (
     "virtual_fs_enabled",
     "virtual_fs_mode",
     "virtual_fs_request_mb",
+    "virtual_fs_concurrency",
     "virtual_fs_sources",
 )
 
@@ -416,6 +418,7 @@ _SAVE_SETTINGS_INT_FIELDS = (
     "config_backup_keep",
     "config_backup_max_age_days",
     "virtual_fs_request_mb",
+    "virtual_fs_concurrency",
 )
 
 _SAVE_SETTINGS_BOOL_FIELDS = ("plex_verify_ssl", "webhook_enabled", "auto_requeue_on_restart", "virtual_fs_enabled")

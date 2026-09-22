@@ -498,6 +498,15 @@
                     </div>
                 </div>
                 <div class="row">
+                    <div class="col-md-4 mb-3">
+                        <label for="virtualFsConcurrency" class="form-label">Samples in flight
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How many thumbnails are fetched at once per file. Each sample is one short ffmpeg mostly waiting on the server, so a few in flight overlap that wait. Each holds one upstream connection; keep it within your server's connection budget."><i class="bi bi-info-circle"></i></button>
+                        </label>
+                        <input type="number" class="form-control has-stepper" id="virtualFsConcurrency" min="1" max="16" value="4">
+                        <div class="form-text">Default: 4.</div>
+                    </div>
+                </div>
+                <div class="row">
                     <div class="col-md-6 mb-3">
                         <label for="virtualFsLocalRoot" class="form-label">Mount path in this app
                             <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Where the virtual filesystem is mounted inside this container, e.g. /mnt/debrid/infinidysk. Library symlinks are followed, so this is the path their targets live under."><i class="bi bi-info-circle"></i></button>
@@ -958,6 +967,7 @@ async function loadSettings() {
         document.getElementById('virtualFsEnabled').checked = settings.virtual_fs_enabled === true;
         document.getElementById('virtualFsMode').value = settings.virtual_fs_mode || 'auto';
         document.getElementById('virtualFsRequestMb').value = settings.virtual_fs_request_mb ?? 4;
+        document.getElementById('virtualFsConcurrency').value = settings.virtual_fs_concurrency ?? 4;
         const vfsSource = (settings.virtual_fs_sources || [])[0] || {};
         document.getElementById('virtualFsLocalRoot').value = vfsSource.local_root || '';
         document.getElementById('virtualFsUrl').value = vfsSource.url || '';
@@ -1128,6 +1138,7 @@ async function saveAllSettings() {
         virtual_fs_enabled: document.getElementById('virtualFsEnabled').checked,
         virtual_fs_mode: document.getElementById('virtualFsMode').value || 'auto',
         virtual_fs_request_mb: Math.min(64, Math.max(1, parseInt(document.getElementById('virtualFsRequestMb').value, 10) || 4)),
+        virtual_fs_concurrency: Math.min(16, Math.max(1, parseInt(document.getElementById('virtualFsConcurrency').value, 10) || 4)),
         // A blank mount path or URL clears the source list (the backend drops incomplete rows).
         virtual_fs_sources: [{
             local_root: document.getElementById('virtualFsLocalRoot').value.trim(),

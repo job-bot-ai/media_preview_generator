@@ -255,6 +255,7 @@ def _validate_virtual_fs_config(
     virtual_fs_sources: list,
     virtual_fs_request_mb: int,
     validation_errors: list,
+    virtual_fs_concurrency: int = 4,
 ) -> None:
     """Validate the virtual-filesystem read settings.
 
@@ -267,6 +268,7 @@ def _validate_virtual_fs_config(
         virtual_fs_sources: Normalised ``{local_root, url, user, password}`` entries
         virtual_fs_request_mb: Upstream request size in MiB (the server's per-request floor)
         validation_errors: List to append validation errors
+        virtual_fs_concurrency: Samples in flight per file
 
     """
     if not virtual_fs_enabled:
@@ -281,6 +283,11 @@ def _validate_virtual_fs_config(
     # make a single thumbnail cost more than a short episode.
     if virtual_fs_request_mb < 1 or virtual_fs_request_mb > 64:
         validation_errors.append(f"VIRTUAL_FS_REQUEST_MB must be between 1-64 MiB (got: {virtual_fs_request_mb})")
+
+    # Each in-flight sample holds one upstream connection; 16 already saturates
+    # the connection budget of a typical Usenet-backed server.
+    if virtual_fs_concurrency < 1 or virtual_fs_concurrency > 16:
+        validation_errors.append(f"VIRTUAL_FS_CONCURRENCY must be between 1-16 (got: {virtual_fs_concurrency})")
 
     if not virtual_fs_sources:
         validation_errors.append(

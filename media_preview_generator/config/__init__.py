@@ -36,8 +36,8 @@ from .validation import (  # noqa: F401
     _validate_paths,
     _validate_plex_config,
     _validate_processing_config,
-    _validate_virtual_fs_config,
     _validate_thread_config,
+    _validate_virtual_fs_config,
     thread_totals_from_ui_settings,
     validate_processing_thread_totals,
 )
@@ -216,6 +216,7 @@ class Config:
     virtual_fs_mode: str = "auto"  # auto | sampled | sequential
     virtual_fs_sources: list[dict[str, Any]] = field(default_factory=list)
     virtual_fs_request_mb: int = 4
+    virtual_fs_concurrency: int = 4  # samples in flight per file
     virtual_fs_auto_margin: float = 1.5
 
     def __repr__(self) -> str:
@@ -611,6 +612,7 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
     virtual_fs_enabled = get_value("virtual_fs_enabled", "VIRTUAL_FS_ENABLED", False, bool)
     virtual_fs_mode = get_value("virtual_fs_mode", "VIRTUAL_FS_MODE", "auto", str).strip().lower()
     virtual_fs_request_mb = get_value("virtual_fs_request_mb", "VIRTUAL_FS_REQUEST_MB", 4, int)
+    virtual_fs_concurrency = get_value("virtual_fs_concurrency", "VIRTUAL_FS_CONCURRENCY", 4, int)
     virtual_fs_sources = normalize_virtual_fs_sources(ui_settings.get("virtual_fs_sources"))
     if not virtual_fs_sources and os.environ.get("VIRTUAL_FS_ROOT") and os.environ.get("VIRTUAL_FS_URL"):
         virtual_fs_sources = normalize_virtual_fs_sources(
@@ -756,6 +758,7 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
         virtual_fs_sources,
         virtual_fs_request_mb,
         validation_errors,
+        virtual_fs_concurrency,
     )
     no_workers, _thread_note = _validate_thread_config(
         gpu_threads,
@@ -828,6 +831,7 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
         virtual_fs_mode=virtual_fs_mode,
         virtual_fs_sources=virtual_fs_sources,
         virtual_fs_request_mb=virtual_fs_request_mb,
+        virtual_fs_concurrency=virtual_fs_concurrency,
         # server_display_name intentionally NOT set here — load_config()
         # always projects from media_servers[0] (no server_id param), so
         # surfacing that name on the returned Config would be misleading
